@@ -1,4 +1,5 @@
-from services.cosmos_token_store import TokenStore
+from services.dependencies import token_store# ✅ USE SHARED INSTANCE
+
 
 async def governance_node(state: dict):
 
@@ -6,8 +7,7 @@ async def governance_node(state: dict):
 
     project_id = state["project_id"]
 
-    token_store = TokenStore()
-
+    # ✅ Use shared initialized instance
     usage = await token_store.get_or_create_project(project_id)
 
     tokens_used = usage["tokens_used"]
@@ -20,14 +20,13 @@ async def governance_node(state: dict):
     state["tokens_remaining"] = tokens_remaining
     state["token_quota"] = token_quota
 
-    # Quota check
+    # 🚫 Quota exceeded
     if tokens_remaining <= 0:
 
         state["allowed"] = False
 
         state["violations"].append("TOKEN_QUOTA_EXCEEDED")
 
-        # Record decision
         state["policy_decisions"].append({
             "node": "governance_node",
             "rule": "TOKEN_QUOTA",
@@ -40,7 +39,7 @@ async def governance_node(state: dict):
 
         return state
 
-    # Allowed path
+    # ✅ Allowed
     state["policy_decisions"].append({
         "node": "governance_node",
         "rule": "TOKEN_QUOTA",

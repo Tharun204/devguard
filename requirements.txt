@@ -41,10 +41,8 @@ uuid_utils==0.14.1
 uvicorn==0.41.0
 xxhash==3.6.0
 zstandard==0.25.0
-streamlit
-azure-cosmos
-pandas
-plotly
-python-dotenv
+streamlit==1.33.0
+azure-cosmos==4.7.0
+pandas==2.2.2
+plotly==5.22.0
 opencensus-ext-azure==1.1.15
- 

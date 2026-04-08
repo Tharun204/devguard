@@ -1,20 +1,17 @@
-# services/cosmos_token_store.py
-
 import os
 from azure.cosmos.aio import CosmosClient
+from azure.cosmos import PartitionKey
 from dotenv import load_dotenv
 
 load_dotenv()
 
-COSMOS_URI     = os.getenv("COSMOS_URI")
-COSMOS_KEY     = os.getenv("COSMOS_KEY")
-DATABASE_NAME  = "devguard"
+COSMOS_URI = os.getenv("COSMOS_URI")
+COSMOS_KEY = os.getenv("COSMOS_KEY")
+
+DATABASE_NAME = "devguard"
 CONTAINER_NAME = "token_usage"
 
-# Project token budget
 MAX_TOKENS = 1000000
-
-# Conservative buffer to prevent near-quota requests
 AVG_TOKENS_PER_REQUEST = 2000
 
 
@@ -22,90 +19,94 @@ class TokenStore:
 
     def __init__(self):
         if not COSMOS_URI:
-            raise RuntimeError("COSMOS_URI not found in environment variables")
+            raise RuntimeError("COSMOS_URI not found")
         if not COSMOS_KEY:
-            raise RuntimeError("COSMOS_KEY not found in environment variables")
+            raise RuntimeError("COSMOS_KEY not found")
+
+        self.client = CosmosClient(COSMOS_URI, credential=COSMOS_KEY)
+        self.database = None
+        self.container = None
+
+    # ✅ Initialize Cosmos DB
+    async def init(self):
+        if self.container:
+            return  # already initialized
 
         print("[Cosmos] Connecting to database...")
-        self.client    = CosmosClient(COSMOS_URI, credential=COSMOS_KEY)
-        self.database  = self.client.get_database_client(DATABASE_NAME)
-        self.container = self.database.get_container_client(CONTAINER_NAME)
+
+        self.database = await self.client.create_database_if_not_exists(
+            id=DATABASE_NAME
+        )
+
+        self.container = await self.database.create_container_if_not_exists(
+            id=CONTAINER_NAME,
+            partition_key=PartitionKey(path="/project_id")
+        )
+
         print("[Cosmos] Connected successfully.")
 
-    async def _close(self):
-        # Close aiohttp session opened by CosmosClient
-        try:
-            await self.client.close()
-        except Exception:
-            pass
+    # ✅ Auto-init safety (CRITICAL FIX)
+    async def _ensure_init(self):
+        if self.container is None:
+            print("[Cosmos] Auto-initializing (fallback)...")
+            await self.init()
 
-    # Get or create project record
+    # ✅ Close only at shutdown
+    async def close(self):
+        if self.client:
+            await self.client.close()
+            print("[Cosmos] Connection closed")
+
+    # ✅ Get or create project
     async def get_or_create_project(self, project_id: str):
+
+        await self._ensure_init()
+
         try:
             item = await self.container.read_item(
                 item=project_id,
                 partition_key=project_id
             )
             return item
+
         except Exception:
             print(f"[Cosmos] Creating new project record: {project_id}")
+
             new_item = {
-                "id":          project_id,
-                "project_id":  project_id,
+                "id": project_id,
+                "project_id": project_id,
                 "tokens_used": 0,
                 "token_quota": MAX_TOKENS
             }
+
             await self.container.create_item(body=new_item)
             return new_item
 
-    # Pre-flight quota check (before LLM call)
+    # ✅ Check quota
     async def check_quota(self, project_id: str, estimated_tokens: int = AVG_TOKENS_PER_REQUEST):
-        try:
-            item        = await self.get_or_create_project(project_id)
-            tokens_used = item["tokens_used"]
-            quota       = item["token_quota"]
-            remaining   = quota - tokens_used
 
-            if remaining <= 0 or remaining < AVG_TOKENS_PER_REQUEST:
-                print(f"[Token Store] Quota EXCEEDED — "
-                      f"Used: {tokens_used} / {quota} | Remaining: {remaining}")
-                return {
-                    "allowed":           False,
-                    "tokens_used_total": tokens_used,
-                    "tokens_remaining":  remaining,
-                    "token_quota":       quota
-                }
+        item = await self.get_or_create_project(project_id)
 
-            print(f"[Token Store] Quota OK — "
-                  f"Used: {tokens_used} / {quota} | Remaining: {remaining}")
-            return {
-                "allowed":           True,
-                "tokens_used_total": tokens_used,
-                "tokens_remaining":  remaining,
-                "token_quota":       quota
-            }
-        finally:
-            await self._close()
+        tokens_used = item["tokens_used"]
+        quota = item["token_quota"]
+        remaining = quota - tokens_used
 
-    # Update tokens after LLM call
+        if remaining <= 0 or remaining < estimated_tokens:
+            print(f"[Token Store] Quota EXCEEDED — Used: {tokens_used}/{quota}")
+            return {"allowed": False}
+
+        print(f"[Token Store] Quota OK — Used: {tokens_used}/{quota}")
+        return {"allowed": True}
+
+    # ✅ Update tokens
     async def update_tokens(self, project_id: str, tokens_used_request: int):
-        try:
-            item      = await self.get_or_create_project(project_id)
-            new_total = item["tokens_used"] + tokens_used_request
-            quota     = item["token_quota"]
 
-            item["tokens_used"] = new_total
-            await self.container.replace_item(item=item, body=item)
+        item = await self.get_or_create_project(project_id)
 
-            remaining = quota - new_total
-            print(f"[Token Store] Updated — "
-                  f"Used: {new_total} / {quota} | Remaining: {remaining}")
+        item["tokens_used"] += tokens_used_request
 
-            return {
-                "tokens_used_request": tokens_used_request,
-                "tokens_used_total":   new_total,
-                "tokens_remaining":    remaining,
-                "token_quota":         quota,
-            }
-        finally:
-            await self._close()
+        await self.container.replace_item(item=item, body=item)
+
+        print(f"[Token Store] Updated — Used: {item['tokens_used']}")
+
+        return item
