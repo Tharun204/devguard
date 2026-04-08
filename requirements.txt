@@ -23,7 +23,7 @@ langsmith==0.7.7
 openai==2.24.0
 orjson==3.11.7
 ormsgpack==1.12.2
-packaging==26.0
+packaging==24.1
 pydantic==2.12.5
 pydantic_core==2.41.5
 python-dotenv==1.2.1
